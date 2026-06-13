@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Local credentials and machine-specific runtime config.
+.env
+.env.*
+!.env.example
+scripts/.env
+scripts/.env.*
+!scripts/.env.example
+
+# Generated data and analysis outputs.
+data/
+network/
+causal/
+result/
+zombie&batch/
+failed_agents_last_run.json
+
+# OS/editor noise.
+.DS_Store

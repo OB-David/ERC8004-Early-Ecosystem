@@ -1,0 +1,8 @@
+web3
+psycopg2-binary
+pandas
+requests
+python-dateutil
+scikit-learn
+matplotlib
+networkx
