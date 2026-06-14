@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
 Run a GPS-weighted causal analysis from continuous agent activity to adjusted reputation.
 
-This is the main version of the GPS-weighted causal analysis from continuous agent
-activity to adjusted reputation.
+This copy treats non-ERC8004 other transactions as an observed confounder in the
+GPS model.
 
 Outputs:
-    ERC8004/causal/agent_scores.csv
-    ERC8004/causal/causal_results.csv
-    ERC8004/causal/covariate_balance.csv
+    ERC8004/causal_2/agent_scores.csv
+    ERC8004/causal_2/causal_results.csv
+    ERC8004/causal_2/covariate_balance.csv
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ except ModuleNotFoundError as exc:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
-RESULT_DIR = REPO_ROOT / "causal"
+RESULT_DIR = REPO_ROOT / "causal_2"
 
 AGENT_STATISTIC_CSV = DATA_DIR / "agent_statistic.csv"
 
@@ -48,7 +47,7 @@ GPS_WEIGHT_LOWER_Q = 0.01
 GPS_WEIGHT_UPPER_Q = 0.99
 END_BLOCK = 25277687
 
-ACTIVITY_NAME = "identity_ecosystem_tx"
+ACTIVITY_NAME = "identity_ecosystem_tx_other_tx_confounder"
 ACTIVITY_COL = "activity_score"
 OUTCOME_COL = "adjusted_reputation"
 ACTIVITY_DESCRIPTION = "activity_score = log1p(identity_operation_count + ecosystem_operation_count)"
@@ -57,11 +56,13 @@ OUTCOME_DESCRIPTION = "adjusted_reputation = shrinkage-adjusted reputation * div
 GPS_COVARIATES = [
     "log_survival_blocks",
     "owner_agent_count",
+    "log_other_operation_count",
 ]
 
 BALANCE_COVARIATES = [
     "log_survival_blocks",
     "owner_agent_count",
+    "log_other_operation_count",
 ]
 
 
@@ -179,7 +180,9 @@ def load_data(k_r: float = DEFAULT_K_R) -> pd.DataFrame:
 
     identity_count = df["identity_operation_count"].astype(float).clip(lower=0.0)
     ecosystem_count = df["ecosystem_operation_count"].astype(float).clip(lower=0.0)
+    other_count = df["other_operation_count"].astype(float).clip(lower=0.0)
     df["activity_score"] = np.log1p(identity_count + ecosystem_count)
+    df["log_other_operation_count"] = np.log1p(other_count)
 
     global_mean = float(df["reputation"].mean())
     feedback_count = df["feedback_count"].astype(float)
@@ -398,6 +401,7 @@ def write_agent_scores(df: pd.DataFrame) -> None:
         "identity_operation_count",
         "ecosystem_operation_count",
         "other_operation_count",
+        "log_other_operation_count",
         "activity_score",
         "core_score",
         "diversity_penalty",
@@ -412,6 +416,7 @@ def write_agent_scores(df: pd.DataFrame) -> None:
         "gps_effective_sample_size",
         "gps_model_log_survival_blocks_coef",
         "gps_model_owner_agent_count_coef",
+        "gps_model_log_other_operation_count_coef",
         "gps_model_intercept",
     ]
 
@@ -452,4 +457,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

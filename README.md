@@ -51,7 +51,7 @@ python scripts/main_node.py
 ```bash
 python analysis/causal_activity_reputation.py
 python analysis/feedback_network.py
-python analysis/zombie&batch.py
+python "analysis/zombie&batch.py"
 ```
 
 ## Git Ignore Policy

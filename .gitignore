@@ -13,7 +13,9 @@ scripts/.env.*
 # Generated data and analysis outputs.
 data/
 network/
+network2/
 causal/
+causal_2/
 result/
 zombie&batch/
 failed_agents_last_run.json

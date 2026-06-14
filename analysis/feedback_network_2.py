@@ -2,28 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-Build and visualize the ERC-8004 trust feedback network.
+Build and visualize the ERC-8004 trust feedback network with agent activity/reputation styling.
 
-This is the main version of visualizing the ERC-8004 trust feedback network.
+This version focuses on visualizing the activity and reputation of agents.
+Agent node sizes are based on reputation and colors are based on activity.
 
 Inputs:
     ERC8004/data/agent_reputation.csv
     ERC8004/data/agent_core.csv
     ERC8004/data/all_agent.csv
+    ERC8004/causal_2/agent_scores.csv
 
 Outputs:
-    ERC8004/network/trust_nodes.csv
-    ERC8004/network/trust_edges_raw.csv
-    ERC8004/network/trust_edges_agg.csv
-    ERC8004/network/trust_degree_distribution.csv
-    ERC8004/network/trust_network_metrics.csv
-    ERC8004/network/trust_network.pdf
-    ERC8004/network/feedback_network_stats.pdf
+    ERC8004/network/trust_network_activity_reputation.pdf
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import math
 from collections import Counter
@@ -59,18 +56,21 @@ except ModuleNotFoundError as exc:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
-NETWORK_DIR = REPO_ROOT / "network"
+NETWORK_DIR = REPO_ROOT / "network2"
+CAUSAL_DIR = REPO_ROOT / "causal_2"
 
 AGENT_REPUTATION_CSV = DATA_DIR / "agent_reputation.csv"
 AGENT_CORE_CSV = DATA_DIR / "agent_core.csv"
 ALL_AGENT_CSV = DATA_DIR / "all_agent.csv"
+AGENT_SCORES_CSV = CAUSAL_DIR / "agent_scores.csv"
+ACTIVITY_REPUTATION_NETWORK_PDF = NETWORK_DIR / "trust_network_activity_reputation.pdf"
 
 NODE_TYPES = ("agent", "owner", "contract", "eoa")
 NODE_COLORS = {
     "agent": "#3B6EA8",
-    "owner": "#C97B32",
-    "contract": "#8B6BAE",
-    "eoa": "#8A8F98",
+    "owner": "#565D66",
+    "contract": "#565D66",
+    "eoa": "#565D66",
 }
 NODE_MARKERS = {
     "agent": "o",
@@ -90,6 +90,9 @@ NODE_DEGREE_SCALES = {
     "contract": 4,
     "eoa": 1.5,
 }
+AGENT_REPUTATION_SIZE_MIN = 5.0
+AGENT_REPUTATION_SIZE_MAX = 560.0
+AGENT_ACTIVITY_CMAP = "coolwarm"
 AGENT_FEEDBACK_EDGE_COLORS = [
     "#3B6EA8",
     "#5E88B8",
@@ -99,7 +102,7 @@ AGENT_FEEDBACK_EDGE_COLORS = [
 ]
 AGENT_TO_AGENT_EDGE_COLOR = "#3B6EA8"
 OWNER_AGENT_EDGE_COLOR = "#C97B32"
-DEFAULT_EDGE_COLOR = "#6F7782"
+DEFAULT_EDGE_COLOR = "#8D949D"
 
 FEEDBACK_STATS_PDF = NETWORK_DIR / "feedback_network_stats.pdf"
 
@@ -207,6 +210,22 @@ def load_owner_wallets() -> set[str]:
         for owner_wallet in (norm_addr(row.get("owner_wallet")) for row in rows)
         if owner_wallet
     }
+
+
+def load_agent_visual_scores() -> Dict[int, Dict[str, float]]:
+    """Load agent activity and reputation scores for visual styling."""
+    rows = read_csv_rows(AGENT_SCORES_CSV, ["agent_id", "activity_score", "adjusted_reputation"])
+    scores: Dict[int, Dict[str, float]] = {}
+    for row in rows:
+        agent_id_raw = str(row.get("agent_id") or "").strip()
+        if not agent_id_raw:
+            continue
+        agent_id = int(agent_id_raw)
+        scores[agent_id] = {
+            "activity_score": safe_float(row.get("activity_score")),
+            "adjusted_reputation": safe_float(row.get("adjusted_reputation")),
+        }
+    return scores
 
 
 def count_feedback_by_agent(reputation_rows: Sequence[Dict[str, str]]) -> Counter:
@@ -577,6 +596,50 @@ def choose_visual_nodes(graph: nx.MultiDiGraph, max_nodes: int) -> List[str]:
     return agent_nodes + other_nodes[: max_nodes - len(agent_nodes)]
 
 
+def spread_agent_positions(
+    positions: Dict[str, Tuple[float, float]],
+    node_types: Dict[str, str],
+    min_distance: float = 0.34,
+    iterations: int = 80,
+) -> Dict[str, Tuple[float, float]]:
+    adjusted = {node: [float(x), float(y)] for node, (x, y) in positions.items()}
+    agent_nodes = [node for node in adjusted if node_types.get(node, "eoa") == "agent"]
+    if len(agent_nodes) < 2:
+        return {node: (xy[0], xy[1]) for node, xy in adjusted.items()}
+
+    for _ in range(iterations):
+        max_shift = 0.0
+        for left_index, left_node in enumerate(agent_nodes):
+            for right_index in range(left_index + 1, len(agent_nodes)):
+                right_node = agent_nodes[right_index]
+                left = adjusted[left_node]
+                right = adjusted[right_node]
+                dx = right[0] - left[0]
+                dy = right[1] - left[1]
+                distance = math.hypot(dx, dy)
+
+                if distance >= min_distance:
+                    continue
+                if distance <= 1e-9:
+                    angle = 2.39996323 * (left_index + right_index + 1)
+                    dx = math.cos(angle)
+                    dy = math.sin(angle)
+                    distance = 1.0
+
+                push = 0.5 * (min_distance - distance) / distance
+                shift_x = dx * push
+                shift_y = dy * push
+                left[0] -= shift_x
+                left[1] -= shift_y
+                right[0] += shift_x
+                right[1] += shift_y
+                max_shift = max(max_shift, abs(shift_x) + abs(shift_y))
+        if max_shift < 0.001:
+            break
+
+    return {node: (xy[0], xy[1]) for node, xy in adjusted.items()}
+
+
 def community_cluster_layout(graph: nx.DiGraph, node_types: Dict[str, str]) -> Dict[str, Tuple[float, float]]:
     undirected = graph.to_undirected()
     if undirected.number_of_nodes() == 0:
@@ -592,7 +655,7 @@ def community_cluster_layout(graph: nx.DiGraph, node_types: Dict[str, str]) -> D
 
     communities = sorted((set(nodes) for nodes in communities), key=lambda nodes: (-len(nodes), sorted(nodes)[0]))
     community_count = len(communities)
-    center_radius = max(1, 0.24 * math.sqrt(max(community_count, 1)))
+    center_radius = max(2.1, 0.55 * math.sqrt(max(community_count, 1)))
     positions: Dict[str, Tuple[float, float]] = {}
 
     for index, nodes in enumerate(communities):
@@ -606,19 +669,44 @@ def community_cluster_layout(graph: nx.DiGraph, node_types: Dict[str, str]) -> D
             positions[node] = (center_x, center_y)
             continue
 
-        cluster_scale = 0.20 + 0.062 * math.sqrt(len(nodes))
+        cluster_scale = 0.72 + 0.165 * math.sqrt(len(nodes))
         local_pos = nx.spring_layout(
             subgraph,
             seed=42 + index,
-            k=1.55 / math.sqrt(len(nodes)),
-            iterations=260,
+            k=3.0 / math.sqrt(len(nodes)),
+            iterations=520,
             weight=None,
             scale=cluster_scale,
         )
         for node, (x, y) in local_pos.items():
             positions[node] = (center_x + float(x), center_y + float(y))
 
-    return positions
+    return spread_agent_positions(positions, node_types, min_distance=0.18, iterations=55)
+
+
+def normalize_score(value: float, values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    low = min(values)
+    high = max(values)
+    if high <= low:
+        return 0.5
+    return max(0.0, min(1.0, (value - low) / (high - low)))
+
+
+def rank_score(value: float, values: Sequence[float]) -> float:
+    sorted_values = sorted(values)
+    if len(sorted_values) <= 1:
+        return 0.5
+    left = bisect.bisect_left(sorted_values, value)
+    right = bisect.bisect_right(sorted_values, value)
+    midpoint_rank = (left + right - 1) / 2.0
+    return max(0.0, min(1.0, midpoint_rank / (len(sorted_values) - 1)))
+
+
+def interpolate_size(value: float, values: Sequence[float], min_size: float, max_size: float) -> float:
+    scaled = rank_score(value, values) ** 1.75
+    return min_size + scaled * (max_size - min_size)
 
 
 def draw_network_page(
@@ -626,6 +714,7 @@ def draw_network_page(
     multi_graph: nx.MultiDiGraph,
     agg_graph: nx.DiGraph,
     node_types: Dict[str, str],
+    agent_visual_scores: Dict[int, Dict[str, float]],
     max_nodes: int,
 ) -> None:
     visual_nodes = choose_visual_nodes(multi_graph, max_nodes)
@@ -659,37 +748,66 @@ def draw_network_page(
             arrowsize=6.0,
             width=0.42 if node_types.get(source) != "eoa" else 0.34,
             alpha=0.75 if node_types.get(source) != "eoa" else 0.24,
-            edge_color=(
-                AGENT_TO_AGENT_EDGE_COLOR
-                if node_types.get(source) == "agent" and node_types.get(target) == "agent"
-                else OWNER_AGENT_EDGE_COLOR
-                if {node_types.get(source), node_types.get(target)} == {"agent", "owner"}
-                else DEFAULT_EDGE_COLOR
-            ),
+            edge_color=DEFAULT_EDGE_COLOR,
             connectionstyle=f"arc3,rad={rad}",
             min_source_margin=2.0,
             min_target_margin=2.0,
         )
 
     degree_by_node = dict(raw_subgraph.degree())
+    visible_agent_nodes = [
+        node
+        for node in raw_subgraph.nodes()
+        if node_types.get(node, "eoa") == "agent"
+    ]
+    activity_values = [
+        agent_visual_scores.get(int(raw_subgraph.nodes[node].get("agent_id") or 0), {}).get("activity_score", 0.0)
+        for node in visible_agent_nodes
+    ]
+    reputation_values = [
+        agent_visual_scores.get(int(raw_subgraph.nodes[node].get("agent_id") or 0), {}).get("adjusted_reputation", 0.0)
+        for node in visible_agent_nodes
+    ]
+    activity_cmap = plt.get_cmap(AGENT_ACTIVITY_CMAP)
+
     for node_type in NODE_TYPES:
         nodes = [node for node in raw_subgraph.nodes() if node_types.get(node, "eoa") == node_type]
         if not nodes:
             continue
-        sizes = [
-            NODE_BASE_SIZES[node_type] + NODE_DEGREE_SCALES[node_type] * math.sqrt(max(degree_by_node.get(node, 0), 1))
-            for node in nodes
-        ]
+        if node_type == "agent":
+            sizes = []
+            colors = []
+            for node in nodes:
+                agent_id = int(raw_subgraph.nodes[node].get("agent_id") or 0)
+                scores = agent_visual_scores.get(agent_id, {})
+                activity = float(scores.get("activity_score", 0.0))
+                reputation = float(scores.get("adjusted_reputation", 0.0))
+                sizes.append(
+                    interpolate_size(
+                        reputation,
+                        reputation_values,
+                        AGENT_REPUTATION_SIZE_MIN,
+                        AGENT_REPUTATION_SIZE_MAX,
+                    )
+                )
+                colors.append(activity_cmap(0.15 + 0.80 * normalize_score(activity, activity_values)))
+            node_color = colors
+        else:
+            sizes = [
+                NODE_BASE_SIZES[node_type] + NODE_DEGREE_SCALES[node_type] * math.sqrt(max(degree_by_node.get(node, 0), 1))
+                for node in nodes
+            ]
+            node_color = NODE_COLORS[node_type]
         nx.draw_networkx_nodes(
             raw_subgraph,
             pos,
             nodelist=nodes,
             node_size=sizes,
-            node_color=NODE_COLORS[node_type],
+            node_color=node_color,
             node_shape=NODE_MARKERS[node_type],
             edgecolors="white" if node_type != "eoa" else "none",
             linewidths=0.45 if node_type != "eoa" else 0.0,
-            alpha=0.9 if node_type != "eoa" else 0.58,
+            alpha=0.92 if node_type == "agent" else 0.48,
             ax=ax,
         )
 
@@ -699,29 +817,26 @@ def draw_network_page(
             [0],
             marker=NODE_MARKERS[node_type],
             color="none",
-            markerfacecolor=NODE_COLORS[node_type],
+            markerfacecolor=activity_cmap(0.75) if node_type == "agent" else NODE_COLORS[node_type],
             markeredgecolor="white" if node_type != "eoa" else "none",
-            markersize=6.5 if node_type != "eoa" else 4,
-            label={"agent": "Agent wallet", "owner": "Owner wallet", "contract": "Contract", "eoa": "EOA"}[node_type],
+            markersize=9.0 if node_type != "eoa" else 6.0,
+            label={
+                "agent": "Agent (color=activity, size=reputation)",
+                "owner": "Owner wallet",
+                "contract": "Contract",
+                "eoa": "EOA",
+            }[node_type],
         )
         for node_type in NODE_TYPES
     ]
+
     legend_handles.append(
         Line2D(
             [0],
             [0],
-            color=AGENT_TO_AGENT_EDGE_COLOR,
-            linewidth=1.4,
-            label="Agent-to-agent feedback",
-        )
-    )
-    legend_handles.append(
-        Line2D(
-            [0],
-            [0],
-            color=OWNER_AGENT_EDGE_COLOR,
-            linewidth=1.4,
-            label="Owner wallet-to-agent feedback",
+            color=DEFAULT_EDGE_COLOR,
+            linewidth=2.2,
+            label="Feedback edge",
         )
     )
     ax.legend(
@@ -730,10 +845,18 @@ def draw_network_page(
         bbox_to_anchor=(0.5, -0.02),
         ncol=3,
         frameon=False,
-        fontsize=9,
-        handletextpad=0.4,
-        columnspacing=1.0,
+        fontsize=13,
+        handlelength=1.8,
+        handletextpad=0.55,
+        columnspacing=1.15,
     )
+    if activity_values:
+        norm = matplotlib.colors.Normalize(vmin=min(activity_values), vmax=max(activity_values))
+        sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=activity_cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.026, pad=0.01)
+        cbar.set_label("Agent activity score", fontsize=13)
+        cbar.ax.tick_params(labelsize=14)
 
     pdf.savefig(fig, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
@@ -744,11 +867,12 @@ def write_pdf(
     multi_graph: nx.MultiDiGraph,
     agg_graph: nx.DiGraph,
     node_types: Dict[str, str],
+    agent_visual_scores: Dict[int, Dict[str, float]],
     max_nodes: int,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(path) as pdf:
-        draw_network_page(pdf, multi_graph, agg_graph, node_types, max_nodes)
+        draw_network_page(pdf, multi_graph, agg_graph, node_types, agent_visual_scores, max_nodes)
 
 
 def feedback_edge_type_counts(edge_rows: Sequence[Dict[str, object]]) -> Counter:
@@ -864,7 +988,7 @@ def parse_args() -> argparse.Namespace:
         "--max-visual-nodes",
         type=int,
         default=1000,
-        help="Maximum nodes shown in the PDF graph. CSV outputs still include the full graph. Default: 1000",
+        help="Maximum nodes shown in the PDF graph. Default: 1000",
     )
     return parser.parse_args()
 
@@ -907,86 +1031,18 @@ def main() -> None:
         for node, metadata in node_metadata.items()
     }
 
-    multi_graph, agg_graph, agg_edges = build_graphs(raw_edges, node_metadata)
-    node_rows = build_node_rows(node_metadata, multi_graph, agg_graph)
-    metrics = calculate_metrics(multi_graph, agg_graph, node_types)
-    degree_rows = degree_distribution_rows(agg_graph)
-
-    raw_edge_rows = [
-        {
-            **edge,
-            "source_type": node_types.get(str(edge["source"]), "eoa"),
-            "target_type": node_types.get(str(edge["target"]), "eoa"),
-        }
-        for edge in raw_edges
-    ]
-
-    write_csv(
-        NETWORK_DIR / "trust_nodes.csv",
-        [
-            "node_id",
-            "node_type",
-            "agent_id",
-            "address",
-            "agent_wallet",
-            "owner_wallet",
-            "client_count",
-            "raw_in_degree",
-            "raw_out_degree",
-            "raw_total_degree",
-            "agg_in_degree",
-            "agg_out_degree",
-            "agg_total_degree",
-        ],
-        node_rows,
+    multi_graph, agg_graph, _agg_edges = build_graphs(raw_edges, node_metadata)
+    agent_visual_scores = load_agent_visual_scores()
+    write_pdf(
+        ACTIVITY_REPUTATION_NETWORK_PDF,
+        multi_graph,
+        agg_graph,
+        node_types,
+        agent_visual_scores,
+        max(1, int(args.max_visual_nodes)),
     )
-    write_csv(
-        NETWORK_DIR / "trust_edges_raw.csv",
-        [
-            "source",
-            "target",
-            "source_type",
-            "target_type",
-            "source_address",
-            "target_address",
-            "source_agent_id",
-            "target_agent_id",
-            "source_agent_wallet",
-            "target_agent_wallet",
-            "source_owner_wallet",
-            "target_owner_wallet",
-            "weight",
-            "agent_id",
-            "feedback_tx",
-            "feedback_type",
-            "raw_feedback_client_type",
-        ],
-        raw_edge_rows,
-    )
-    write_csv(
-        NETWORK_DIR / "trust_edges_agg.csv",
-        [
-            "source",
-            "target",
-            "source_type",
-            "target_type",
-            "source_address",
-            "target_address",
-            "source_agent_ids",
-            "target_agent_ids",
-            "weight_mean",
-            "weight_sum",
-            "feedback_count",
-            "top_feedback_types",
-        ],
-        agg_edges,
-    )
-    write_csv(NETWORK_DIR / "trust_degree_distribution.csv", ["degree", "node_count"], degree_rows)
-    write_csv(NETWORK_DIR / "trust_network_metrics.csv", ["metric", "value"], metrics)
-    write_pdf(NETWORK_DIR / "trust_network.pdf", multi_graph, agg_graph, node_types, max(1, int(args.max_visual_nodes)))
-    write_feedback_network_stats_figure(node_rows, raw_edge_rows, agg_edges)
 
-    print(f"[done] trust network outputs saved to {NETWORK_DIR}")
+    print(f"[done] activity/reputation styled network saved to {ACTIVITY_REPUTATION_NETWORK_PDF}")
     print(
         "[nodes] "
         f"agent_core={len(agent_records)} kept_agents={len(kept_agent_ids)} "
@@ -997,4 +1053,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
